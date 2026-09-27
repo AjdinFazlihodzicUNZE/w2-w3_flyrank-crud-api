@@ -4,6 +4,13 @@ const swaggerDocument = require('./openapi.json');
 const { pool, initDb } = require('./db');
 const { z } = require("zod");
 const { TriageInput } = require("./llm/schema");
+const fs = require("fs");
+const path = require("path");
+const client = require("./llm/client");
+
+const PROMPT_VERSION = "v1";
+const PROMPT_PATH = path.join(__dirname, "prompts", `triage-${PROMPT_VERSION}.md`);
+
 const app = express();
 const port = 3000;
 
@@ -122,21 +129,27 @@ app.post("/triage", async (req, res) => {
     });
   }
 
+  const systemPrompt = fs.readFileSync(PROMPT_PATH, "utf8");
 
-  if (process.env.LLM_STUB === "1") {
-    return res.json({
-      category: "bug",
-      urgency: "normal",
-      team: "engineering",
-      confidence: 0.9,
-      reason: "Stub mode reply — no model was called.",
+  let raw;
+  try {
+    const response = await client.chat.completions.create({
+      model: process.env.LLM_MODEL,
+      temperature: 0,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: JSON.stringify({ text: parsed.data.text }) },
+      ],
     });
+    raw = response.choices[0].message.content;
+  } catch (err) {
+    console.error("Model call failed:", err.message);
+    return res.status(500).json({ error: "Model call failed" });
   }
 
+  console.log(`[triage ${PROMPT_VERSION}] model replied:`, raw);
 
-  return res.status(501).json({
-    error: "Real model call not implemented yet. Set LLM_STUB=1 to test.",
-  });
+  return res.json({ raw_model_output: raw, prompt_version: PROMPT_VERSION });
 });
 app.listen(port, () => console.log(`its alive on http://localhost:${port}`));
 

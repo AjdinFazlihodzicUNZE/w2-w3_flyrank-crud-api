@@ -125,4 +125,33 @@ curl -s -X POST http://localhost:3000/triage \
   -d '{}'
   {"error":"Invalid input","field":"text","detail":"Invalid input: expected string, received undefined"}
 ```
+### Linux note (Docker → Ollama on host)
 
+On Linux, an Ollama install binds to `127.0.0.1:11434` by default, which
+containers cannot reach. Two things must be true on the host:
+
+1. Ollama listens on all interfaces (I did this before firewall part so maybe you can skip this part):
+
+       sudo mkdir -p /etc/systemd/system/ollama.service.d
+       sudo nano /etc/systemd/system/ollama.service.d/override.conf
+
+   Contents:
+
+       [Service]
+       Environment="OLLAMA_HOST=0.0.0.0:11434"
+
+   Then:
+
+       sudo systemctl daemon-reload
+       sudo systemctl restart ollama
+
+   Verify: `sudo ss -tlnp | grep 11434` shows `*:11434` (not `127.0.0.1:11434`).
+
+2. If `ufw` is active, allow the Docker subnet to reach that port:
+
+       sudo ufw allow from 172.16.0.0/12 to any port 11434 proto tcp
+       sudo ufw reload
+
+Without both, the endpoint answers `{"error":"Model call failed"}`
+because the container's request to `host.docker.internal:11434`
+times out.
