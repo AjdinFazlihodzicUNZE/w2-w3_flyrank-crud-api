@@ -2,8 +2,11 @@ const express = require('express');
 const swaggerUi = require('swagger-ui-express');
 const swaggerDocument = require('./openapi.json');
 const { pool, initDb } = require('./db');
+const { z } = require("zod");
+const { TriageInput } = require("./llm/schema");
 const app = express();
 const port = 3000;
+
 
 app.use(express.json());
 app.use('/docs', swaggerUi.serve, swaggerUi.setup(swaggerDocument));
@@ -107,6 +110,33 @@ app.delete('/tasks/:id', async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+app.post("/triage", async (req, res) => {
 
+  const parsed = TriageInput.safeParse(req.body);
+  if (!parsed.success) {
+    const first = parsed.error.issues[0];
+    return res.status(400).json({
+      error: "Invalid input",
+      field: first.path.join("."),
+      detail: first.message,
+    });
+  }
+
+
+  if (process.env.LLM_STUB === "1") {
+    return res.json({
+      category: "bug",
+      urgency: "normal",
+      team: "engineering",
+      confidence: 0.9,
+      reason: "Stub mode reply — no model was called.",
+    });
+  }
+
+
+  return res.status(501).json({
+    error: "Real model call not implemented yet. Set LLM_STUB=1 to test.",
+  });
+});
 app.listen(port, () => console.log(`its alive on http://localhost:${port}`));
 

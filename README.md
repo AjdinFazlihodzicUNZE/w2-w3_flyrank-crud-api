@@ -107,4 +107,22 @@ The model runs locally via Ollama. Three environment variables
 between a model on this laptop and one in a datacentre — that is why
 the provider is never hard-coded.
 
+### Example requests
+
+Valid input:
+
+```bash
+curl -s -X POST http://localhost:3000/triage \
+  -H "Content-Type: application/json" \
+  -d '{"text":"My invoice shows a duplicate charge from last month."}'
+```
+
+Invalid input (missing `text`):
+
+```bash
+curl -s -X POST http://localhost:3000/triage \
+  -H "Content-Type: application/json" \
+  -d '{}'
+  {"error":"Invalid input","field":"text","detail":"Invalid input: expected string, received undefined"}
+```
 

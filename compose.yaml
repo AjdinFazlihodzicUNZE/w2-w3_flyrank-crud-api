@@ -5,6 +5,13 @@ services:
       - "3000:3000"
     environment:
       DATABASE_URL: postgres://postgres:dev@db:5432/tasks
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:11434/v1}
+      LLM_API_KEY: ${LLM_API_KEY:-ollama}
+      LLM_MODEL: ${LLM_MODEL:-gemma3:1b}
+      LLM_STUB: ${LLM_STUB:-0}
+      LLM_ENABLED: ${LLM_ENABLED:-true}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       - db
 
