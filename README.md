@@ -99,3 +99,12 @@ doesn't disappear, though — it's kept in a Docker volume, so it survives a
 ![Postgres data screenshot](./postgres.PNG)
 
 
+## LLM endpoint (W7 / A17)
+
+A new `POST /triage` endpoint classifies support messages using an LLM.
+The model runs locally via Ollama. Three environment variables
+(`LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`) are the only difference
+between a model on this laptop and one in a datacentre — that is why
+the provider is never hard-coded.
+
+
