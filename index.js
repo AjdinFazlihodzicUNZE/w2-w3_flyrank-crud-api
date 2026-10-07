@@ -128,6 +128,18 @@ app.post("/triage", async (req, res) => {
       detail: first.message,
     });
   }
+
+  if (process.env.LLM_ENABLED === "false") {
+    console.warn("[triage] Kill switch active (LLM_ENABLED=false). Returning fallback.");
+    return res.json({
+      category: "other",
+      urgency: "normal",
+      team: "support",
+      confidence: 0.0,
+      reason: "Fallback: AI triage is temporarily disabled.",
+    });
+  }
+
   if (process.env.LLM_STUB === "1") {
     return res.json({
       category: "bug",
@@ -137,44 +149,61 @@ app.post("/triage", async (req, res) => {
       reason: "Stub mode reply — no model was called.",
     });
   }
+
   const systemPrompt = fs.readFileSync(PROMPT_PATH, "utf8");
   const userText = parsed.data.text;
+  const startTime = Date.now();
+  let totalInputTokens = 0;
+  let totalOutputTokens = 0;
   let raw1;
   try {
-    const response1 = await client.chat.completions.create({
-      model: process.env.LLM_MODEL,
-      temperature: 0,
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: JSON.stringify({ text: userText }) },
-      ],
-    });
+    const response1 = await callModelWithRetry([
+      { role: "system", content: systemPrompt },
+      { role: "user", content: JSON.stringify({ text: userText }) },
+    ]);
+
     raw1 = response1.choices[0].message.content;
+    
+    if (response1.usage) {
+      totalInputTokens += response1.usage.prompt_tokens || 0;
+      totalOutputTokens += response1.usage.completion_tokens || 0;
+    }
   } catch (err) {
+    if (err.name === "APIConnectionTimeoutError" || err.code === "ETIMEDOUT") {
+      return res.status(504).json({ error: "Gateway Timeout: Model request timed out" });
+    }
     console.error("Model call 1 failed:", err.message);
     return res.status(500).json({ error: "Model call failed" });
   }
   const result1 = parseAndValidateTriage(raw1);
   if (result1.success) {
+    logCost({
+      prompt_version: PROMPT_VERSION,
+      model: process.env.LLM_MODEL,
+      input_tokens: totalInputTokens,
+      output_tokens: totalOutputTokens,
+      duration_ms: Date.now() - startTime,
+      repaired: false,
+    });
     return res.json(result1.data);
   }
   console.warn(`[triage ${PROMPT_VERSION}] Attempt 1 rejected (${result1.error}). Attempting repair...`);
   let raw2;
   try {
-    const response2 = await client.chat.completions.create({
-      model: process.env.LLM_MODEL,
-      temperature: 0,
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: JSON.stringify({ text: userText }) },
-        { role: "assistant", content: raw1 },
-        {
-          role: "user",
-          content: `Your previous answer was rejected for this reason: ${result1.error}. Return only corrected JSON matching the schema.`,
-        },
-      ],
-    });
+      const response2 = await callModelWithRetry([
+      { role: "system", content: systemPrompt },
+      { role: "user", content: JSON.stringify({ text: userText }) },
+      { role: "assistant", content: raw1 },
+      {
+        role: "user",
+        content: `Your previous answer was rejected for this reason: ${result1.error}. Return only corrected JSON matching the schema.`,
+      },
+    ]);
     raw2 = response2.choices[0].message.content;
+    if (response2.usage) {
+      totalInputTokens += response2.usage.prompt_tokens || 0;
+      totalOutputTokens += response2.usage.completion_tokens || 0;
+    }
   } catch (err) {
     console.error("Repair model call failed:", err.message);
     logQuarantine({
@@ -188,9 +217,25 @@ app.post("/triage", async (req, res) => {
   const result2 = parseAndValidateTriage(raw2);
   if (result2.success) {
     console.log(`[triage ${PROMPT_VERSION}] Repair succeeded!`);
+    logCost({
+      prompt_version: PROMPT_VERSION,
+      model: process.env.LLM_MODEL,
+      input_tokens: totalInputTokens,
+      output_tokens: totalOutputTokens,
+      duration_ms: Date.now() - startTime,
+      repaired: true,
+    });
     return res.json(result2.data);
   }
   console.error(`[triage ${PROMPT_VERSION}] Repair failed. Quarantining output.`);
+  logCost({
+    prompt_version: PROMPT_VERSION,
+    model: process.env.LLM_MODEL,
+    input_tokens: totalInputTokens,
+    output_tokens: totalOutputTokens,
+    duration_ms: Date.now() - startTime,
+    repaired: true,
+  });
   logQuarantine({
     input: userText,
     rawOutput: raw2,
@@ -258,6 +303,64 @@ function logQuarantine({ input, rawOutput, error, promptVersion }) {
     console.log(`[quarantine] Logged invalid response to ${QUARANTINE_PATH}`);
   } catch (err) {
     console.error("Failed to write quarantine log:", err.message);
+  }
+}
+function logCost({ prompt_version, model, input_tokens, output_tokens, duration_ms, repaired }) {
+  const costEntry = {
+    type: "llm_cost",
+    timestamp: new Date().toISOString(),
+    prompt_version,
+    model,
+    input_tokens: input_tokens || 0,
+    output_tokens: output_tokens || 0,
+    total_tokens: (input_tokens || 0) + (output_tokens || 0),
+    duration_ms,
+    repaired,
+  };
+  console.log(JSON.stringify(costEntry));
+}
+async function callModelWithRetry(messages, maxRetries = 2) {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const response = await client.chat.completions.create({
+        model: process.env.LLM_MODEL,
+        temperature: 0,
+        messages,
+      });
+      return response;
+    } catch (err) {
+      const status = err.status;
+      const isTimeout = err.name === "APIConnectionTimeoutError" || err.code === "ETIMEDOUT";
+
+      if (status === 400 || status === 401 || status === 403) {
+        console.error(`[retry] Fatal client error (${status}): ${err.message}. Not retrying.`);
+        throw err;
+      }
+
+      if (attempt === maxRetries) {
+        console.error(`[retry] Exhausted all ${maxRetries} retries. Failing:`, err.message);
+        throw err;
+      }
+
+      if (isTimeout || status === 429 || (status >= 500 && status <= 599)) {
+
+        let delayMs = Math.pow(2, attempt) * 1000 + Math.floor(Math.random() * 500);
+
+
+        if (err.headers && err.headers["retry-after"]) {
+          const retryAfterSec = parseFloat(err.headers["retry-after"]);
+          if (!isNaN(retryAfterSec)) {
+            delayMs = retryAfterSec * 1000;
+          }
+        }
+
+        console.warn(`[retry] Attempt ${attempt + 1} failed (${err.message}). Retrying in ${Math.round(delayMs)}ms...`);
+        await new Promise((res) => setTimeout(res, delayMs));
+      } else {
+
+        throw err;
+      }
+    }
   }
 }
 app.listen(port, () => console.log(`its alive on http://localhost:${port}`));

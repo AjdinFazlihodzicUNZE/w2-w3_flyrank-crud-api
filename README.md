@@ -155,3 +155,10 @@ containers cannot reach. Two things must be true on the host:
 Without both, the endpoint answers `{"error":"Model call failed"}`
 because the container's request to `host.docker.internal:11434`
 times out.
+
+### Production reliability & Retry policy (Stage 4)
+
+- **Timeout:** Set explicitly to 30 seconds (`timeout: 30000`), overriding the 10-minute SDK default.
+- **Retry policy:** SDK auto-retries are disabled (`maxRetries: 0`) in favor of explicit application-level retry logic with exponential backoff and random jitter (1s, 2s, 4s). Only retries on timeouts, 429 rate limits, and 5xx server errors; 400, 401, and 403 errors fail fast without retrying.
+- **Cost logging:** Each call logs a structured JSON line with `prompt_version`, `model`, token counts (`input_tokens`, `output_tokens`), `duration_ms`, and `repaired` flag.
+- **Kill switch:** Setting `LLM_ENABLED=false` immediately bypasses the model and returns a safe, deterministic fallback response.
